@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>True North Compass Test</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #121212;
+      color: #f5f5f5;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      margin: 0;
+      padding: 20px;
+      box-sizing: border-box;
+      text-align: center;
+    }
+
+    button {
+      background: #2563eb;
+      color: white;
+      border: none;
+      padding: 14px 28px;
+      font-size: 16px;
+      font-weight: 600;
+      border-radius: 8px;
+      cursor: pointer;
+      margin-bottom: 24px;
+    }
+
+    button:disabled {
+      background: #374151;
+      color: #9ca3af;
+      cursor: default;
+    }
+
+    .compass-wrapper {
+      position: relative;
+      width: 260px;
+      height: 260px;
+      margin-bottom: 24px;
+    }
+
+    svg {
+      width: 100%;
+      height: 100%;
+      transition: transform 0.05s linear;
+    }
+
+    .lubber-line {
+      position: absolute;
+      top: -10px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 4px;
+      height: 24px;
+      background: #ef4444;
+      border-radius: 2px;
+      z-index: 2;
+    }
+
+    .readout {
+      background: #1e1e1e;
+      padding: 16px 24px;
+      border-radius: 12px;
+      width: 100%;
+      max-width: 320px;
+      text-align: left;
+      font-variant-numeric: tabular-nums;
+      line-height: 1.7;
+    }
+
+    .readout span {
+      float: right;
+      font-weight: bold;
+      color: #60a5fa;
+    }
+
+    #status {
+      margin-top: 12px;
+      font-size: 13px;
+      color: #9ca3af;
+    }
+  </style>
+</head>
+<body>
+
+  <button id="startBtn">Start Compass &amp; GPS</button>
+
+  <div class="compass-wrapper">
+    <div class="lubber-line" title="Phone Top Direction"></div>
+    <svg id="compassDial" viewBox="0 0 200 200">
+      <circle cx="100" cy="100" r="95" fill="#1f2937" stroke="#4b5563" stroke-width="3" />
+      <circle cx="100" cy="100" r="70" fill="none" stroke="#374151" stroke-width="1" stroke-dasharray="4 4" />
+      
+      <!-- Cardinal Labels -->
+      <text x="100" y="25" fill="#ef4444" font-size="18" font-weight="bold" text-anchor="middle">N</text>
+      <text x="178" y="106" fill="#d1d5db" font-size="16" font-weight="bold" text-anchor="middle">E</text>
+      <text x="100" y="185" fill="#d1d5db" font-size="16" font-weight="bold" text-anchor="middle">S</text>
+      <text x="22" y="106" fill="#d1d5db" font-size="16" font-weight="bold" text-anchor="middle">W</text>
+
+      <!-- North Pointer Triangle -->
+      <polygon points="100,32 93,50 107,50" fill="#ef4444" />
+      <circle cx="100" cy="100" r="5" fill="#9ca3af" />
+    </svg>
+  </div>
+
+  <div class="readout">
+    <div>True Azimuth: <span id="trueVal">--°</span></div>
+    <div>Magnetic Heading: <span id="magVal">--°</span></div>
+    <div>Declination: <span id="decVal">Waiting for GPS...</span></div>
+    <div>GPS Fix: <span id="gpsVal">--</span></div>
+  </div>
+
+  <div id="status">Tap "Start Compass &amp; GPS" to grant sensor permissions.</div>
+
+  <script>
+    const startBtn = document.getElementById("startBtn");
+    const compassDial = document.getElementById("compassDial");
+    const trueVal = document.getElementById("trueVal");
+    const magVal = document.getElementById("magVal");
+    const decVal = document.getElementById("decVal");
+    const gpsVal = document.getElementById("gpsVal");
+    const statusEl = document.getElementById("status");
+
+    let userCoords = null;
+    let smoothedHeading = null;
+    let lastRenderedAngle = -999;
+    const SMOOTHING_FACTOR = 0.15;
+
+    // 1. Circular Low-Pass Smoothing Filter
+    function smoothAngle(rawHeading) {
+      if (smoothedHeading === null) {
+        smoothedHeading = rawHeading;
+        return smoothedHeading;
+      }
+      const delta = ((rawHeading - smoothedHeading + 540) % 360) - 180;
+      smoothedHeading = (smoothedHeading + SMOOTHING_FACTOR * delta + 360) % 360;
+      return smoothedHeading;
+    }
+
+    // 2. Offline Geomagnetic Declination Formula
+    function getMagneticDeclination(lat, lon) {
+      const toRad = (deg) => (deg * Math.PI) / 180;
+      const toDeg = (rad) => (rad * 180) / Math.PI;
+
+      const poleLat = toRad(86.5);
+      const poleLon = toRad(-162.5);
+
+      const phi = toRad(lat);
+      const lambda = toRad(lon);
+      const dLon = poleLon - lambda;
+
+      const y = Math.sin(dLon) * Math.cos(poleLat);
+      const x =
+        Math.cos(phi) * Math.sin(poleLat) -
+        Math.sin(phi) * Math.cos(poleLat) * Math.cos(dLon);
+
+      return toDeg(Math.atan2(y, x));
+    }
+
+    // 3. Handle Orientation Sensor Events
+    function handleOrientation(event) {
+      let rawMagnetic = null;
+
+      if (typeof event.webkitCompassHeading === "number") {
+        rawMagnetic = event.webkitCompassHeading;
+      } else if (event.absolute === true && event.alpha !== null) {
+        rawMagnetic = (360 - event.alpha) % 360;
+      }
+
+      if (rawMagnetic === null) {
+        statusEl.textContent = "Device orientation received, but no magnetic north sensor data found.";
+        return;
+      }
+
+      const cleanMagnetic = smoothAngle(rawMagnetic);
+      let finalAzimuth = cleanMagnetic;
+
+      if (userCoords) {
+        const dec = getMagneticDeclination(userCoords.latitude, userCoords.longitude);
+        finalAzimuth = (cleanMagnetic + dec + 360) % 360;
+        const dir = dec >= 0 ? "E" : "W";
+        decVal.textContent = `${Math.abs(dec).toFixed(1)}° ${dir}`;
+      }
+
+      // Deadband check to prevent excessive DOM repaints
+      if (Math.abs(finalAzimuth - lastRenderedAngle) > 0.3) {
+        lastRenderedAngle = finalAzimuth;
+        // Rotate dial counter-clockwise so 'N' always points to real-world North
+        compassDial.style.transform = `rotate(${-finalAzimuth.toFixed(1)}deg)`;
+        trueVal.textContent = `${finalAzimuth.toFixed(1)}°`;
+        magVal.textContent = `${cleanMagnetic.toFixed(1)}°`;
+      }
+    }
+
+    // 4. Initialize Sensors & Permissions
+    startBtn.addEventListener("click", async () => {
+      startBtn.disabled = true;
+      statusEl.textContent = "Requesting permissions...";
+
+      // Request iOS 13+ Orientation Permission
+      if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
+        try {
+          const response = await DeviceOrientationEvent.requestPermission();
+          if (response !== "granted") {
+            statusEl.textContent = "Orientation permission denied.";
+            startBtn.disabled = false;
+            return;
+          }
+        } catch (err) {
+          statusEl.textContent = "Permission error: " + err.message;
+          startBtn.disabled = false;
+          return;
+        }
+      }
+
+      // Start Orientation Listener
+      if ("ondeviceorientationabsolute" in window) {
+        window.addEventListener("deviceorientationabsolute", handleOrientation);
+        statusEl.textContent = "Listening to deviceorientationabsolute...";
+      } else {
+        window.addEventListener("deviceorientation", handleOrientation);
+        statusEl.textContent = "Listening to deviceorientation...";
+      }
+
+      // Start GPS Listener for Declination
+      if ("geolocation" in navigator) {
+        navigator.geolocation.watchPosition(
+          (pos) => {
+            userCoords = pos.coords;
+            gpsVal.textContent = `${pos.coords.latitude.toFixed(4)}, ${pos.coords.longitude.toFixed(4)}`;
+            statusEl.textContent = "Active: Compass & GPS locked.";
+          },
+          (err) => {
+            gpsVal.textContent = "Unavailable";
+            decVal.textContent = "0.0° (Fallback)";
+            statusEl.textContent = `Compass active (GPS error: ${err.message})`;
+          },
+          { enableHighAccuracy: true }
+        );
+      } else {
+        gpsVal.textContent = "Unsupported";
+      }
+    });
+  </script>
+</body>
+</html>
